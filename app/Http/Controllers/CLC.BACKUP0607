@@ -1,0 +1,537 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\CallList;
+use App\Models\CallStatusMaster; // CallStatusMasterモデルをuse
+use Illuminate\Http\Request;
+use App\Models\CallHistory; // CallHistoryモデルをuse
+use Illuminate\Support\Facades\Auth; // Authファサードをuse
+use Illuminate\Support\Facades\Validator; // Validatorファサードをuse (任意)
+use Carbon\Carbon; // Carbonをuse
+use Illuminate\Http\JsonResponse; // ★ JsonResponseをuse
+use App\Models\DoNotCallList; // ★ DoNotCallList モデルをuseに追加
+use Illuminate\Support\Facades\Log;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;      // ★★★ この行を追加 ★★★
+use Illuminate\Support\Str;            
+ // ★★★ この行を追加 ★★★
+
+/**
+ * 架電結果を記録する
+ *
+ * @param  \Illuminate\Http\Request  $request
+ * @param  \App\Models\CallList  $callList
+ * @return \Illuminate\Http\RedirectResponse
+ */
+
+class CallListController extends Controller
+{
+
+    /**
+     * 指定された架電リストの履歴を取得する
+     *
+     * @param string $callListId
+     * @return \Illuminate\Http\JsonResponse
+     */
+
+    private function getStatusTailwindClasses(string $statusName): string
+    {
+        // このマッピングは、Bladeビューの @match と同じロジックです
+        return match ($statusName) {
+            'アポイント' => 'bg-green-100 dark:bg-green-800 text-green-700 dark:text-green-200',
+            '再度架電', '追いかけ', '留守番（折り返し）' => 'bg-yellow-100 dark:bg-yellow-800 text-yellow-700 dark:text-yellow-200',
+            'NG', '求人なし', '電話番号なし' => 'bg-red-100 dark:bg-red-800 text-red-700 dark:text-red-200',
+            default => 'bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200',
+        };
+    }
+
+    public function getHistories(string $callListId): JsonResponse
+    {
+        // ... (このメソッドの中身は変更なし) ...
+        $callList = CallList::find($callListId);
+        if (!$callList) {
+            return response()->json(['error' => '指定された架電リストが見つかりません。'], 404);
+        }
+
+        $histories = CallHistory::where('call_list_id', $callListId)
+            ->with(['user:id,name', 'status:id,status_name']) // ここで CallHistory モデルのリレーションが使われる
+            ->orderBy('called_at', 'desc')
+            ->get();
+
+        return response()->json($histories);
+    }
+
+
+    public function recordCall(Request $request, CallList $callList): JsonResponse
+    {
+        $validatedData = $request->validate([
+            'call_status_id' => 'required|exists:call_status_master,id',
+            'call_memo'      => 'nullable|string|max:10000',
+            'called_at'      => 'required|date_format:Y-m-d\TH:i',
+        ]);
+
+        CallHistory::create([
+            'call_list_id'       => $callList->id,
+            'call_status_id'     => $validatedData['call_status_id'],
+            'call_memo'          => $validatedData['call_memo'],
+            'called_at'          => Carbon::parse($validatedData['called_at']),
+            'created_by_user_id' => Auth::id(),
+        ]);
+
+        $callList->latest_call_status_id = $validatedData['call_status_id'];
+        $callList->latest_call_memo      = $validatedData['call_memo'];
+        $callList->touch();
+        $callList->save();
+
+        // 更新後の最新ステータス情報を取得 (リレーションを再読み込み)
+        $callList->load('latestCallStatus');
+        $newStatusName = $callList->latestCallStatus ? $callList->latestCallStatus->status_name : __('未設定');
+        $newStatusClasses = $this->getStatusTailwindClasses($newStatusName);
+
+        return response()->json([
+            'success' => true,
+            'message' => $callList->company_name . ' の架電結果を記録しました。',
+            'updated_call_list_data' => [
+                'id' => $callList->id,
+                'latest_call_status_name' => $newStatusName, // ★ ステータス名
+                'latest_call_status_classes' => $newStatusClasses, // ★ CSSクラス
+                'latest_call_memo_short' => Str::limit($callList->latest_call_memo, 30),
+                'updated_at_formatted' => $callList->updated_at->format('Y/m/d H:i'), // ★ フォーマット済み日時
+            ]
+        ]);
+    }
+
+
+    /**
+     * Display a listing of the resource.
+     */
+    public function index(Request $request)
+    {
+        $user = Auth::user();
+        $query = CallList::query()->with(['latestCallStatus', 'user', 'phoneNumbers']);
+
+        // 役割に基づく基本的な絞り込み
+        if ($user->role === 'eigyo') {
+            $query->where('user_id', $user->id);
+        } elseif ($user->role !== 'admin') {
+            $query->where((new CallList())->getTable() . '.id', '<', 0);
+        }
+
+        // --- フィルター条件の取得 ---
+        $filterCompanyName = $request->query('filter_company_name');
+        $filterStatusIds = $request->query('filter_status_ids');
+        $validatedDates = $request->validate([
+            'start_date' => 'nullable|date|before_or_equal:end_date',
+            'end_date'   => 'nullable|date|after_or_equal:start_date',
+        ]);
+        $startDate = $validatedDates['start_date'] ?? null;
+        $endDate = $validatedDates['end_date'] ?? null;
+
+        // ★★★ クエリスコープを使ってフィルターを適用 ★★★
+        $query->filterByCompanyName($filterCompanyName)
+              ->filterByStatusIds($filterStatusIds)
+              ->filterByDateRange($startDate, $endDate);
+
+        // --- 並び替え条件の取得と検証・適用 ---
+        $sortBy = $request->query('sort_by', 'updated_at');
+        $sortDirection = $request->query('sort_direction', 'desc');
+        $sortableColumns = [
+            'id', 'company_name', 'representative_name',
+            'latest_call_status_id', 'call_histories_count',
+            'updated_at', 'created_at', 'latest_actual_call_date'
+        ];
+        if (!in_array($sortBy, $sortableColumns)) $sortBy = 'updated_at';
+        if (!in_array(strtolower($sortDirection), ['asc', 'desc'])) $sortDirection = 'desc';
+
+        // 並び替えの適用 (この部分は変更なし)
+        if ($sortBy === 'latest_actual_call_date') {
+            $mainTable = (new CallList())->getTable();
+            $latestCalledAtSubquery = \App\Models\CallHistory::select('called_at') // CallHistoryモデルをフルパスで指定
+                ->whereColumn('call_list_id', $mainTable . '.id')
+                ->orderBy('called_at', 'desc')
+                ->orderBy('id', 'desc') // 念のため tie-breaker
+                ->limit(1);
+            $query->select($mainTable . '.*')
+                  ->selectSub($latestCalledAtSubquery, 'latest_called_at_sortable')
+                  ->orderBy('latest_called_at_sortable', $sortDirection);
+        } elseif ($sortBy === 'call_histories_count') {
+            $query->select((new CallList())->getTable() . '.*')
+                  ->withCount('callHistories')
+                  ->orderBy('call_histories_count', $sortDirection);
+        } else {
+            $query->orderBy($sortBy, $sortDirection);
+        }
+
+        $callLists = $query->paginate(15)->withQueryString();
+        $allStatuses = CallStatusMaster::orderBy('sort_order')->get();
+
+        return view('call_list.index', compact(
+            'callLists', 'sortBy', 'sortDirection',
+            'filterCompanyName', 'filterStatusIds', 'startDate', 'endDate', 'allStatuses'
+        ));
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     */
+    public function create()
+    {
+        $statuses = CallStatusMaster::orderBy('sort_order')->get(); // 表示順でソートして取得
+        return view('call_list.create', compact('statuses'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     */
+    public function store(Request $request)
+    {
+        $validatedData = $request->validate([
+            'company_name' => 'required|string|max:255',
+            'phone_number' => 'nullable|string|max:50',
+            'mobile_phone_number' => 'nullable|string|max:50',
+            'representative_name' => 'nullable|string|max:100',
+            'mobile_phone_owner' => 'nullable|string|max:100',
+            'address' => 'nullable|string|max:255',
+            'latest_call_status_id' => 'required|exists:call_status_master,id',
+            'latest_call_memo' => 'nullable|string',
+        ]);
+
+        // ★★★ ここからDNCチェックロジックを追加 ★★★
+        $isDnc = false;
+        $dncMessage = '';
+
+        // 電話番号でDNCチェック (入力されていれば)
+        if (!empty($validatedData['phone_number'])) {
+            $dncPhoneEntry = DoNotCallList::whereNotNull('phone_number')
+                ->where('phone_number', $validatedData['phone_number'])
+                ->first();
+            if ($dncPhoneEntry) {
+                $isDnc = true;
+                $dncMessage = __('電話番号「:phone」は架電禁止リストに登録されています。', ['phone' => $validatedData['phone_number']]);
+                if ($dncPhoneEntry->reason) {
+                    $dncMessage .= __(' (理由: :reason)', ['reason' => $dncPhoneEntry->reason]);
+                }
+            }
+        }
+
+        // 会社名でDNCチェック (電話番号でDNCに該当しておらず、かつ会社名が入力されていれば)
+        if (!$isDnc && !empty($validatedData['company_name'])) {
+            $dncCompanyEntry = DoNotCallList::whereNotNull('company_name')
+                ->where('company_name', $validatedData['company_name'])
+                ->first();
+            if ($dncCompanyEntry) {
+                $isDnc = true;
+                $dncMessage = __('会社名「:company」は架電禁止リストに登録されています。', ['company' => $validatedData['company_name']]);
+                if ($dncCompanyEntry->reason) {
+                    $dncMessage .= __(' (理由: :reason)', ['reason' => $dncCompanyEntry->reason]);
+                }
+            }
+        }
+
+        if ($isDnc) {
+            // DNCリストに該当した場合、エラーメッセージと共に前のページ (登録フォーム) に戻る
+            return redirect()->back()
+                ->withErrors(['dnc_check' => $dncMessage]) // dnc_check というキーでエラーを渡す
+                ->withInput(); // 入力値を保持する
+        }
+        // ★★★ DNCチェックロジックここまで ★★★
+
+        // CallListにデータを保存 (1回にまとめる)
+        $callList = CallList::create([
+            'user_id' => Auth::id(), // ログインユーザーのID
+            'company_name' => $validatedData['company_name'],
+            'phone_number' => $validatedData['phone_number'],
+            'mobile_phone_number' => $validatedData['mobile_phone_number'],
+            'representative_name' => $validatedData['representative_name'],
+            'mobile_phone_owner' => $validatedData['mobile_phone_owner'],
+            'address' => $validatedData['address'],
+            'latest_call_status_id' => $validatedData['latest_call_status_id'],
+            'latest_call_memo' => $validatedData['latest_call_memo'],
+        ]);
+
+        // 初回の架電履歴をCallHistoryに記録
+        if ($callList) { // CallListの作成が成功したら
+            CallHistory::create([
+                'call_list_id' => $callList->id,
+                'call_status_id' => $validatedData['latest_call_status_id'], // CallListと同じステータス
+                'call_memo' => $validatedData['latest_call_memo'] ?? '初回登録時のステータス', // メモが空ならデフォルト値
+                'called_at' => Carbon::now(), // 現在日時を架電日時とする
+                'created_by_user_id' => Auth::id(), // 記録者もログインユーザー
+            ]);
+        } else {
+            // CallListの作成に失敗した場合の処理 (任意)
+            // 例: return redirect()->back()->withErrors(['error' => '架電リストの登録に失敗しました。'])->withInput();
+        }
+
+        // 保存後、架電リスト一覧ページにリダイレクトし、成功メッセージを表示
+        // route('dashboard') がBreezeのデフォルトのログイン後画面です。
+        // call-list.index が作成済みならそちらが良いでしょう。
+        return redirect()->route('call-list.index')
+            ->with('success', '架電リストに新しい情報を登録しました。');
+    }
+
+    /**
+     * Display the specified resource.
+     */
+    public function show(CallList $callList)
+    {
+        //
+    }
+
+    /**
+     * Show the form for editing the specified resource.
+     */
+    public function edit(CallList $callList)
+    {
+        $statuses = CallStatusMaster::orderBy('sort_order')->get();
+        return view('call_list.edit', compact('callList', 'statuses'));
+    }
+
+    /**
+     * Update the specified resource in storage.
+     */
+    public function update(Request $request, CallList $callList)
+    {
+        // バリデーションルール (storeメソッドとほぼ同じで良いでしょう)
+        $validatedData = $request->validate([
+            'company_name' => 'required|string|max:255',
+            'phone_number' => 'nullable|string|max:50',
+            'mobile_phone_number' => 'nullable|string|max:50',
+            'representative_name' => 'nullable|string|max:100',
+            'mobile_phone_owner' => 'nullable|string|max:100',
+            'address' => 'nullable|string|max:255',
+            'latest_call_status_id' => 'required|exists:call_status_master,id',
+            'latest_call_memo' => 'nullable|string',
+        ]);
+
+        // データの更新
+        $callList->update($validatedData);
+
+        // 更新後、架電リスト一覧ページにリダイレクトし、成功メッセージを表示
+        return redirect()->route('call-list.index')
+            ->with('success', $callList->company_name . ' の情報を更新しました。');
+    }
+
+    /**
+     * Remove the specified resource from storage.
+     */
+    public function destroy(CallList $callList)
+    {
+        // 紐づくCallHistoryも削除したい場合は、ここで先に削除処理を行うか、
+        // モデルのdeletingイベントや外部キー制約でCASCADE DELETEを設定するなどの方法があります。
+        // 今回はCallListのみを削除するシンプルな例とします。
+        // (例: $callList->callHistories()->delete(); )
+
+        $companyName = $callList->company_name; // 削除前に会社名を取得（メッセージ用）
+        $callList->delete();
+
+        return redirect()->route('call-list.index')
+            ->with('success', $companyName . ' の情報を削除しました。');
+    }
+
+    public function processImport(Request $request)
+    {
+
+
+        // 1. ファイルアップロードのバリデーション
+        $request->validate([
+            'csv_file' => 'required|file|mimes:csv,txt|max:2048', // 2MBまで
+        ]);
+
+        $file = $request->file('csv_file');
+        $filePath = $file->getRealPath();
+
+        // 初期化
+        $importedCount = 0;
+        $dncSkippedCount = 0;
+        $duplicateSkippedCount = 0;
+        $errorCount = 0;
+        $errors = [];
+        $lineNumber = 1; // ヘッダー行を1行目とする
+
+        // CSVファイルを開く
+        if (($handle = fopen($filePath, 'r')) !== FALSE) {
+            // ヘッダー行を読み飛ばす (CSVの1行目がヘッダーであると仮定)
+            $header = fgetcsv($handle);
+            if (!$header) {
+                return redirect()->route('call-list.import.form')->with('error', 'CSVファイルが空か、ヘッダー行の読み取りに失敗しました。');
+            }
+            // 期待するヘッダーの列数 (12列)
+            $expectedColumnCount = 12;
+
+            DB::beginTransaction(); // データベーストランザクション開始
+
+            try {
+                while (($row = fgetcsv($handle)) !== FALSE) {
+                    $lineNumber++;
+
+                    // 列数チェック
+                    if (count($row) < $expectedColumnCount) {
+                        $errors[] = $lineNumber . '行目: 列数が不足しています。期待する列数は' . $expectedColumnCount . 'ですが、実際は' . count($row) . '列です。';
+                        $errorCount++;
+                        continue;
+                    }
+
+                    // CSVの列とデータをマッピング
+                    // 0:会社名, 1:電話番号(固定), 2:電話番号(携帯), 3:代表者名, 4:携帯番号主名,
+                    // 5:所在地, 6:架電状況ID, 7:架電内容(latest_call_memo), 8:URL(WEB),
+                    // 9:URL(インスタ), 10:SNS URL, 11:備考(remarks)
+                    $csvData = [ // ★ 変数名を $csvData に変更して分かりやすく
+                        'company_name'        => trim($row[0] ?? ''),
+                        'phone_number'        => trim($row[1] ?? ''),
+                        'mobile_phone_number' => trim($row[2] ?? ''),
+                        'representative_name' => trim($row[3] ?? ''),
+                        'mobile_phone_owner'  => trim($row[4] ?? ''),
+                        'address'             => trim($row[5] ?? ''),
+                        'status_name_from_csv' => trim($row[6] ?? ''), // ★ CSVからは「架電状況名」を読み取る
+                        'latest_call_memo'    => trim($row[7] ?? ''),
+                        'url_website'         => trim($row[8] ?? ''),
+                        'url_instagram'       => trim($row[9] ?? ''),
+                        'url_sns_other'       => trim($row[10] ?? ''),
+                        'remarks'             => trim($row[11] ?? ''),
+                    ];
+
+                    // 値が空のものはnullに変換
+                    foreach ($csvData as $key => $value) {
+                        if ($value === '') {
+                            $csvData[$key] = null;
+                        }
+                    }
+
+                    // ★★★ 架電状況名をIDに変換 ★★★
+                    $latestCallStatusId = null;
+                    if (!empty($csvData['status_name_from_csv'])) {
+                        $statusMaster = CallStatusMaster::where('status_name', $csvData['status_name_from_csv'])->first();
+                        if ($statusMaster) {
+                            $latestCallStatusId = $statusMaster->id;
+                        } else {
+                            // 該当するステータス名が見つからない場合はエラー
+                            $errors[] = $lineNumber . '行目 (' . ($csvData['company_name'] ?: $csvData['phone_number'] ?: 'データなし') . '): 架電状況名「' . $csvData['status_name_from_csv'] . '」が見つかりません。';
+                            $errorCount++;
+                            continue; // 次の行へ
+                        }
+                    } else {
+                        // CSVに架電状況名がない場合はエラー（バリデーションで必須チェックするため）
+                        // バリデーションルール側で latest_call_status_id が required なので、ここで空だとバリデーションエラーになる
+                    }
+
+                    // バリデーション用のデータ配列を作成 (status_name_from_csv を除き、latest_call_status_id を追加)
+                    $dataForValidation = $csvData;
+                    unset($dataForValidation['status_name_from_csv']); // 元の名前は不要
+                    $dataForValidation['latest_call_status_id'] = $latestCallStatusId; // 変換後のIDをセット
+
+                    // 2. 行データのバリデーション
+                    $validator = Validator::make($dataForValidation, [ // ★ バリデーション対象データを変更
+                        'company_name'        => 'required|string|max:255',
+                        // ... (他のバリデーションルールは変更なし) ...
+                        'latest_call_status_id' => 'required|integer|exists:call_status_master,id', // IDでバリデーション
+                        // ...
+                    ]);
+
+                    if ($validator->fails()) {
+                        $errors[] = $lineNumber . '行目 (' . ($csvData['company_name'] ?: $csvData['phone_number'] ?: 'データなし') . '): ' . implode(', ', $validator->errors()->all());
+                        $errorCount++;
+                        continue;
+                    }
+
+                    // 3. DNCチェック (バリデーション済みデータ $dataForValidation を使用)
+                    $isDnc = false;
+                    $dncMessage = '';
+                    if (!empty($dataForValidation['phone_number'])) {
+                        $dncEntry = DoNotCallList::whereNotNull('phone_number')->where('phone_number', $dataForValidation['phone_number'])->first();
+                        if ($dncEntry) {
+                            $isDnc = true;
+                            $dncMessage = "電話番号がDNC";
+                        }
+                    }
+                    if (!$isDnc && !empty($dataForValidation['company_name'])) {
+                        $dncEntry = DoNotCallList::whereNotNull('company_name')->where('company_name', $dataForValidation['company_name'])->first();
+                        if ($dncEntry) {
+                            $isDnc = true;
+                            $dncMessage = "会社名がDNC";
+                        }
+                    }
+                    if ($isDnc) {
+                        $errors[] = $lineNumber . '行目 (' . ($dataForValidation['company_name'] ?: $dataForValidation['phone_number']) . '): ' . $dncMessage . 'のためスキップ。';
+                        $dncSkippedCount++;
+                        continue;
+                    }
+
+                    // 4. 重複チェック (バリデーション済みデータ $dataForValidation を使用)
+                    $existingCallList = null;
+                    if (!empty($dataForValidation['phone_number']) || !empty($dataForValidation['company_name'])) {
+                        $existingCallList = CallList::where('user_id', Auth::id())
+                            ->where(function ($query) use ($dataForValidation) { // ★ $dataForValidation を使用
+                                if (!empty($dataForValidation['phone_number'])) {
+                                    $query->orWhere('phone_number', $dataForValidation['phone_number']);
+                                }
+                                if (!empty($dataForValidation['company_name'])) {
+                                    $query->orWhere('company_name', $dataForValidation['company_name']);
+                                }
+                            })
+                            ->first();
+                    }
+                    if ($existingCallList) {
+                        $errors[] = $lineNumber . '行目 (' . ($dataForValidation['company_name'] ?: $dataForValidation['phone_number']) . '): 既に登録済みのためスキップ（重複）。';
+                        $duplicateSkippedCount++;
+                        continue;
+                    }
+
+                    // 5. データベースへの保存 (バリデーション済みデータ $dataForValidation を使用)
+                    CallList::create([
+                        'user_id' => Auth::id(),
+                        'company_name'        => $dataForValidation['company_name'],
+                        'phone_number'        => $dataForValidation['phone_number'],
+                        'mobile_phone_number' => $dataForValidation['mobile_phone_number'],
+                        'representative_name' => $dataForValidation['representative_name'],
+                        'mobile_phone_owner'  => $dataForValidation['mobile_phone_owner'],
+                        'address'             => $dataForValidation['address'],
+                        'latest_call_status_id' => $dataForValidation['latest_call_status_id'], // ★ 変換後のIDを使用
+                        'latest_call_memo'    => $dataForValidation['latest_call_memo'],
+                        'url_website'         => $dataForValidation['url_website'],
+                        'url_instagram'       => $dataForValidation['url_instagram'],
+                        'url_sns_other'       => $dataForValidation['url_sns_other'],
+                        'remarks'             => $dataForValidation['remarks'],
+                    ]);
+                    $importedCount++;
+                } // while end
+
+                DB::commit(); // 全ての処理が成功したらコミット
+
+            } catch (\Exception $e) { // CSV処理中やDB処理中に予期せぬエラーが起きた場合
+                DB::rollBack(); // エラーが起きたらロールバック
+                Log::error('CSV Import General Error: ' . $e->getMessage() . "\n" . $e->getTraceAsString());
+                return redirect()->route('call-list.import.form')
+                    ->with('error', 'CSVインポート処理中に予期せぬエラーが発生しました。詳細はログを確認してください。影響のあった行: ' . $lineNumber);
+            }
+
+            fclose($handle);
+
+            // 処理結果のメッセージ作成
+            $feedbackMessages = [];
+            if ($importedCount > 0) $feedbackMessages[] = $importedCount . '件のデータをインポートしました。';
+            if ($dncSkippedCount > 0) $feedbackMessages[] = 'DNCリスト該当により ' . $dncSkippedCount . '件スキップ。';
+            if ($duplicateSkippedCount > 0) $feedbackMessages[] = '重複により ' . $duplicateSkippedCount . '件スキップ。';
+            if ($errorCount > 0) $feedbackMessages[] = 'バリデーションエラー等により ' . $errorCount . '件スキップ。';
+
+            $finalMessage = implode(' ', $feedbackMessages);
+            if (empty($finalMessage)) $finalMessage = 'インポート対象のデータがありませんでした。';
+
+            if ($errorCount > 0 || $dncSkippedCount > 0 || $duplicateSkippedCount > 0) {
+                return redirect()->route('call-list.import.form')
+                    ->with('warning', $finalMessage) // スキップがあった場合は warning
+                    ->with('import_errors', $errors);
+            } else {
+                return redirect()->route('call-list.index')->with('success', $finalMessage);
+            }
+        } else {
+            return redirect()->route('call-list.import.form')->with('error', 'CSVファイルを開けませんでした。');
+        }
+    }
+
+    public function showImportForm() // ★ public で、名前が showImportForm であることを確認
+    {
+        return view('call_list.import');
+    }
+}
