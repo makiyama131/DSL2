@@ -265,6 +265,62 @@
                             }
                         }
                     }">
+    <div class="p-6 text-gray-900 dark:text-gray-100" 
+     x-data="{
+
+        // ★★★ 1. リアクティブなリストデータと、タグの定義を追加 ★★★
+        callLists: [], // サーバーから受け取るリストデータ
+        availableTags: [ // タグの種類をここで定義する
+            { name: '見込み客',     color: 'blue' },
+            { name: '名前記録済み', color: 'orange' },
+            { name: '多分いける',   color: 'yellow' }
+        ],
+
+        // ... (initPage, モーダル用のメソッドなど) ...
+
+        // ★★★ 2. 初期化メソッドで callLists を設定 ★★★
+        initPage() {
+            // ... (既存の console.log や this.allStatuses などはそのまま) ...
+            this.callLists = {{ Js::from($callLists->items()) }};
+        },
+
+        // ★★★ 3. タグ操作用のメソッドを2つ追加 ★★★
+        listHasTag(callList, tagName) {
+            if (!callList || !Array.isArray(callList.simple_tags)) {
+                return false;
+            }
+            return callList.simple_tags.includes(tagName);
+        },
+        async toggleSimpleTag(listId, tagName) {
+            const listIndex = this.callLists.findIndex(list => list.id === listId);
+            if (listIndex === -1) return;
+
+            // APIリクエスト
+            try {
+                const response = await fetch(`/call-list/${listId}/toggle-simple-tag`, {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRF-TOKEN': document.querySelector('meta[name=\'csrf-token\']').getAttribute('content'),
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ tag_name: tagName })
+                });
+                const responseData = await response.json();
+                if (!response.ok) {
+                    alert(responseData.message || 'タグの更新に失敗しました。');
+                    throw new Error(responseData.message);
+                }
+
+                // 成功したら、フロントのデータをサーバーからの最新情報で更新
+                this.callLists[listIndex].simple_tags = responseData.tags;
+
+            } catch (error) {
+                console.error('Tag Toggle Error:', error);
+            }
+        }
+     }"
+     x-init="initPage()">
 
                     
 
@@ -366,6 +422,27 @@
                                         </option>
                                     </select>
                                 </div>
+                                <div>
+            <label for="filter_by_tag" class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ __('メモタグ') }}</label>
+            <select name="filter_by_tag" id="filter_by_tag" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md">
+                <option value="">{{ __('すべて') }}</option>
+                
+                @php
+                    // この場でタグの定義をするのがシンプルで分かりやすい
+                    $availableTags = [
+                        ['name' => '見込み客'],
+                        ['name' => '名前記録済み'],
+                        ['name' => '多分いける'],
+                    ];
+                @endphp
+
+                @foreach ($availableTags as $tag)
+                    <option value="{{ $tag['name'] }}" {{ ($filterByTag ?? '') === $tag['name'] ? 'selected' : '' }}>
+                        {{ $tag['name'] }}
+                    </option>
+                @endforeach
+            </select>
+        </div>
 
                             </div>
                             <div class="mt-1 space-y-2 max-h-40 overflow-y-auto border border-gray-300 dark:border-gray-600 rounded-md p-2 bg-white dark:bg-gray-900">
@@ -661,6 +738,21 @@
                                                                 <p class="mt-1 text-xs text-red-500"
                                                                     x-text="callModalErrors.call_memo[0]"></p>
                                                             </template></div>
+                                                            <div>
+    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">メモタグ (2つまで)</label>
+    <div class="mt-2 flex flex-wrap gap-2">
+        <template x-for="tag in availableTags" :key="tag.name">
+            <button type="button"
+                    @click="toggleSimpleTag(callModalSelectedListId, tag.name)"
+                    class="px-2.5 py-0.5 text-xs font-semibold rounded-full transition-all duration-200 transform hover:scale-105 border-2"
+                    :class="listHasTag(callLists.find(list => list.id === callModalSelectedListId), tag.name)
+                        ? `bg-${tag.color}-500 text-white border-transparent`
+                        : `bg-transparent border-${tag.color}-500 text-${tag.color}-600 dark:text-${tag.color}-400 hover:bg-${tag.color}-50 dark:hover:bg-${tag.color}-900/50`">
+                <span x-text="tag.name"></span>
+            </button>
+        </template>
+    </div>
+</div>
                                                         <div><label for="modal_called_at"
                                                                 class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ __('架電日時') }}
                                                                 <span class="text-red-500">*</span></label><input

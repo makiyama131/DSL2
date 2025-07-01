@@ -29,6 +29,7 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
     Route::get('/analytics/call-status', [AnalyticsController::class, 'callStatusAnalytics'])
          ->name('analytics.call_status');
+    Route::post('/call-list/{callList}/toggle-simple-tag', [CallListController::class, 'toggleSimpleTag'])->name('call-list.tags.toggle-simple');
 
        // パフォーマンスデータ関連 (Company にネストする例)
     Route::prefix('companies/{company}/performance-data')->name('performance_data.')->group(function () {

@@ -27,26 +27,6 @@ class CallList extends Model
      * @param  string|null  $phoneNumber
      * @return \Illuminate\Database\Eloquent\Builder
      */
-    public function scopeFilterByPhoneNumber(Builder $query, ?string $phoneNumber): Builder // ★ このメソッドを追加
-    {
-        if ($phoneNumber) {
-            // 検索文字列からハイフンなどの記号を除去して、数字のみにする
-            $searchDigits = preg_replace('/[^0-9]/', '', $phoneNumber);
-
-            if (!empty($searchDigits)) {
-                return $query->where(function ($q) use ($searchDigits) {
-                    // call_listテーブル本体の電話番号を検索
-                    $q->where('phone_number', 'like', '%' . $searchDigits . '%')
-                      ->orWhere('mobile_phone_number', 'like', '%' . $searchDigits . '%')
-                      // phoneNumbersリレーション先の電話番号も検索 (orWhereHas)
-                      ->orWhereHas('phoneNumbers', function ($subQuery) use ($searchDigits) {
-                          $subQuery->where('phone_number', 'like', '%' . $searchDigits . '%');
-                      });
-                });
-            }
-        }
-        return $query;
-    }
 
     protected $table = 'call_list';
 
@@ -78,6 +58,36 @@ class CallList extends Model
      * 論理削除のために $dates プロパティに deleted_at を追加
      */
     protected $dates = ['deleted_at'];
+
+    protected $casts = [
+    // created_at, updated_at, deleted_at など、既存のキャストがあればそのままに
+    'created_at'  => 'datetime',
+    'updated_at'  => 'datetime',
+    'deleted_at'  => 'datetime',
+    'simple_tags' => 'array', // ★ この行を追加
+    ];
+
+    public function scopeFilterByPhoneNumber(Builder $query, ?string $phoneNumber): Builder // ★ このメソッドを追加
+    {
+        if ($phoneNumber) {
+            // 検索文字列からハイフンなどの記号を除去して、数字のみにする
+            $searchDigits = preg_replace('/[^0-9]/', '', $phoneNumber);
+
+            if (!empty($searchDigits)) {
+                return $query->where(function ($q) use ($searchDigits) {
+                    // call_listテーブル本体の電話番号を検索
+                    $q->where('phone_number', 'like', '%' . $searchDigits . '%')
+                      ->orWhere('mobile_phone_number', 'like', '%' . $searchDigits . '%')
+                      // phoneNumbersリレーション先の電話番号も検索 (orWhereHas)
+                      ->orWhereHas('phoneNumbers', function ($subQuery) use ($searchDigits) {
+                          $subQuery->where('phone_number', 'like', '%' . $searchDigits . '%');
+                      });
+                });
+            }
+        }
+        return $query;
+    }
+
 
     /**
      * 最新の架電状況を取得 (CallStatusMaster とのリレーション)
