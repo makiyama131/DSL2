@@ -58,6 +58,25 @@
                                 </li>
                             </ul>
                         </div>
+                        
+                        {{-- 日報関連 --}}
+                        <div class="bg-gray-50 dark:bg-gray-700 p-6 rounded-lg shadow">
+                            <h4 class="text-md font-semibold text-gray-800 dark:text-gray-200 mb-3">{{ __('日報') }}
+                            </h4>
+                            <ul class="space-y-2">
+                                <li>
+                                    <a href="{{ route('daily-reports.create') }}"
+                                        class="text-indigo-600 dark:text-indigo-400 hover:underline">
+                                        {{ __('日報を作成する') }}
+                                    </a>
+                                </li>
+                                {{-- <li>
+                                    <a href="#" class="text-indigo-600 dark:text-indigo-400 hover:underline">
+                                        {{ __('過去の日報一覧') }}
+                                    </a>
+                                </li> --}}
+                            </ul>
+                        </div>
 
                         {{-- 管理者向け機能 --}}
                         @can('is-admin') {{-- ★ 'is-admin' Gateで囲む --}}

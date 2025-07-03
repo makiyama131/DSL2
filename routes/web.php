@@ -7,6 +7,8 @@ use App\Http\Controllers\Admin\DoNotCallListController; // ★ コントロー�
 use App\Http\Controllers\CompanyController; // ファイルの先頭に追加
 use App\Http\Controllers\PerformanceDataController; // ★ PerformanceDataController を use (なければ作成)
 use App\Http\Controllers\AnalyticsController; // ★ AnalyticsController を use に追加
+use App\Http\Controllers\DailyReportController; // 👈 この行を追加
+
 
 
 
@@ -29,6 +31,12 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
     Route::get('/analytics/call-status', [AnalyticsController::class, 'callStatusAnalytics'])
          ->name('analytics.call_status');
+
+    Route::get('/daily-reports/create', [App\Http\Controllers\DailyReportController::class, 'create'])->name('daily-reports.create');
+        Route::post('/daily-reports', [App\Http\Controllers\DailyReportController::class, 'store'])->name('daily-reports.store');
+        Route::get('/daily-reports/create', [DailyReportController::class, 'create'])->name('daily-reports.create');
+        Route::post('/daily-reports', [DailyReportController::class, 'store'])->name('daily-reports.store');
+        
     Route::post('/call-list/{callList}/toggle-simple-tag', [CallListController::class, 'toggleSimpleTag'])->name('call-list.tags.toggle-simple');
 
        // パフォーマンスデータ関連 (Company にネストする例)
@@ -36,9 +44,11 @@ Route::middleware('auth')->group(function () {
         Route::get('/', [PerformanceDataController::class, 'index'])->name('index'); // データ表示
         Route::get('/import', [PerformanceDataController::class, 'showImportForm'])->name('import.create'); // ★ CSVインポートフォーム表示
         Route::post('/import', [PerformanceDataController::class, 'processImport'])->name('import.store'); // CSVインポート処理
+        
         // 他にもパフォーマンスデータ関連のルートがあればここに追加
     });
     Route::resource('companies', CompanyController::class);
+
 
 
      // ★★★ CSVインポート用ルート ★★★

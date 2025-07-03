@@ -22,6 +22,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
+use App\Models\Tag; // ★★★ この行を追加してください ★★★
+
 
 class CallListController extends Controller
 {
@@ -35,44 +37,38 @@ class CallListController extends Controller
     public function index(Request $request)
     {
         $user = Auth::user();
-        
+        $allStatuses = CallStatusMaster::orderBy('sort_order')->get();
+        $allTags = Tag::orderBy('id')->get(); // タグのマスターデータを取得
 
-        // 権限がないユーザーは空のビューを返す
+        // 権限チェック
         if ($user->role !== 'admin' && $user->role !== 'eigyo') {
-            return view('call_list.index', $this->getEmptyViewData());
+            return view('call_list.index', $this->getEmptyViewData($allStatuses, $allTags));
         }
 
-        // 1. 基本クエリを作成し、権限に基づいた絞り込み
-        $query = CallList::query()->with(['latestCallStatus', 'user', 'phoneNumbers']);
+        // 基本クエリ
+        $query = CallList::query()->with(['latestCallStatus', 'user', 'phoneNumbers', 'tags']);
         if ($user->role === 'eigyo') {
             $query->where('user_id', $user->id);
-        } elseif ($user->role !== 'admin') {
-        // ★★★ すぐに return せず、結果が0件になる条件を追加する ★★★
-        $query->whereRaw('1 = 0');
         }
 
-        // 2. リクエストに基づいてフィルターを適用
+        // フィルターとソートの適用
         $this->applyFilters($query, $request);
+        $this->applySorting($query, $request->query('sort_by', 'updated_at'), $request->query('sort_direction', 'desc'));
 
-        // 3. リクエストに基づいて並び替えを適用
-        $sortBy = $request->query('sort_by', 'updated_at');
-        $sortDirection = $request->query('sort_direction', 'desc');
-        $this->applySorting($query, $sortBy, $sortDirection);
-
-        // 4. 結果をページネーション
         $callLists = $query->paginate(15)->withQueryString();
 
-        // 5. 架電禁止(DNC)情報を付与
+        // DNC情報の付与
         if ($callLists->isNotEmpty()) {
             $this->addDncInfoToCallLists($callLists);
         }
 
-        // 6. データをビューに渡す
+        // ビューにデータを渡す
         return view('call_list.index', [
             'callLists'       => $callLists,
-            'allStatuses'     => CallStatusMaster::orderBy('sort_order')->get(),
-            'sortBy'          => $sortBy,
-            'sortDirection'   => $sortDirection,
+            'allStatuses'     => $allStatuses,
+            'allTags'         => $allTags,
+            'sortBy'          => $request->query('sort_by', 'updated_at'),
+            'sortDirection'   => $request->query('sort_direction', 'desc'),
             'filterCompanyName' => $request->query('filter_company_name'),
             'filterPhoneNumber' => $request->query('filter_phone_number'),
             'filterStatusIds'   => $request->query('filter_status_ids') ?? [],
@@ -81,6 +77,25 @@ class CallListController extends Controller
             'filterByTag'       => $request->query('filter_by_tag'),
         ]);
     }
+
+    public function toggleTag(Request $request, CallList $callList): JsonResponse
+    {
+        $validated = $request->validate(['tag_id' => 'required|integer|exists:tags,id']);
+        $tagId = $validated['tag_id'];
+
+        if (Auth::id() !== $callList->user_id && Auth::user()->role !== 'admin') {
+            return response()->json(['success' => false, 'message' => '権限がありません。'], 403);
+        }
+
+        $tags = $callList->tags();
+        if (!$tags->where('tag_id', $tagId)->exists() && $tags->count() >= 2) {
+            return response()->json(['success' => false, 'message' => 'タグは2つまでしか設定できません。'], 422);
+        }
+
+        $tags->toggle($tagId);
+        return response()->json(['success' => true, 'tags' => $callList->fresh()->tags]);
+    }
+
 
     /**
      * 新規架電リストの作成フォームを表示します。
@@ -474,21 +489,19 @@ class CallListController extends Controller
      */
     private function applyFilters(Builder $query, Request $request): void
     {
-        $priorityListType = $request->query('priority_list');
-        if ($priorityListType && in_array($priorityListType, ['am', 'pm'])) {
-            $priorityListIds = $this->_getPriorityListIds($priorityListType);
-            $query->whereIn('call_list.id', $priorityListIds);
-            return;
-        }
-
-        $query->filterByCompanyName($request->query('filter_company_name'))
-            ->filterByPhoneNumber($request->query('filter_phone_number'))
-            ->filterByStatusIds($request->query('filter_status_ids'))
-            ->filterByDateRange($request->query('start_date'), $request->query('end_date'));
-
-        if ($request->filled('filter_by_tag')) {
+        if ($request->query('priority_list') && in_array($request->query('priority_list'), ['am', 'pm'])) {
+            $priorityListIds = $this->_getPriorityListIds($request->query('priority_list'));
+            $query->whereIn('call_list.id', !empty($priorityListIds) ? $priorityListIds : [-1]);
+        } else {
+            $query->filterByCompanyName($request->query('filter_company_name'))
+                  ->filterByPhoneNumber($request->query('filter_phone_number'))
+                  ->filterByRemarks($request->query('filter_remarks'))
+                  ->filterByStatusIds($request->query('filter_status_ids'))
+                  ->filterByDateRange($request->query('start_date'), $request->query('end_date'));
+            if ($request->filled('filter_by_tag')) {
                 $query->whereJsonContains('simple_tags', $request->query('filter_by_tag'));
             }
+        }
     }
 
     /**
@@ -496,38 +509,20 @@ class CallListController extends Controller
      */
     private function applySorting(Builder $query, string $sortBy, string $sortDirection): void
     {
-        $sortableColumns = [
-            'id',
-            'company_name',
-            'representative_name',
-            'latest_call_status_id',
-            'call_histories_count',
-            'updated_at',
-            'created_at',
-            'latest_actual_call_date'
-        ];
-
+        $sortableColumns = [ 'id', 'company_name', 'latest_call_status_id', 'call_histories_count', 'updated_at', 'created_at', 'latest_actual_call_date', 'simple_tags'];
         $sortBy = in_array($sortBy, $sortableColumns) ? $sortBy : 'updated_at';
         $sortDirection = in_array(strtolower($sortDirection), ['asc', 'desc']) ? $sortDirection : 'desc';
 
-        switch ($sortBy) {
-            case 'latest_actual_call_date':
-                $mainTable = (new CallList())->getTable();
-                $latestCalledAtSubquery = CallHistory::select('called_at')
-                    ->whereColumn('call_list_id', "{$mainTable}.id")
-                    ->orderBy('called_at', 'desc')->orderBy('id', 'desc')->limit(1);
-
-                $query->select("{$mainTable}.*")
-                    ->selectSub($latestCalledAtSubquery, 'latest_called_at_sortable')
-                    ->orderBy('latest_called_at_sortable', $sortDirection);
-                break;
-            case 'call_histories_count':
-                $query->withCount('callHistories')
-                    ->orderBy('call_histories_count', $sortDirection);
-                break;
-            default:
-                $query->orderBy($sortBy, $sortDirection);
-                break;
+        if ($sortBy === 'simple_tags') {
+            $orderCase = "CASE WHEN JSON_CONTAINS(simple_tags, '\"見込み客\"') THEN 1 WHEN JSON_CONTAINS(simple_tags, '\"名前記録済み\"') THEN 2 WHEN JSON_CONTAINS(simple_tags, '\"多分いける\"') THEN 3 ELSE 4 END";
+            $query->orderByRaw($orderCase)->orderBy('updated_at', 'desc');
+        } elseif ($sortBy === 'latest_actual_call_date') {
+            $latestCalledAtSubquery = CallHistory::select('called_at')->whereColumn('call_list_id', 'call_list.id')->orderBy('called_at', 'desc')->limit(1);
+            $query->select('call_list.*')->selectSub($latestCalledAtSubquery, 'latest_called_at_sortable')->orderBy('latest_called_at_sortable', $sortDirection);
+        } elseif ($sortBy === 'call_histories_count') {
+            $query->withCount('callHistories')->orderBy('call_histories_count', $sortDirection);
+        } else {
+            $query->orderBy($sortBy, $sortDirection);
         }
     }
 
@@ -568,19 +563,15 @@ class CallListController extends Controller
     /**
      * 権限がないユーザー向けの空のビューデータを返します。
      */
-    private function getEmptyViewData(): array
+    private function getEmptyViewData(object $allStatuses, object $allTags): array
     {
         return [
-            'callLists'       => collect([]),
-            'allStatuses'     => CallStatusMaster::orderBy('sort_order')->get(),
-            'sortBy'          => 'updated_at',
-            'sortDirection'   => 'desc',
-            'filterCompanyName' => null,
-            'filterPhoneNumber' => null,
-            'filterStatusIds' => [],
-            'startDate'       => null,
-            'endDate'           => null,
-            'filterByTag'     => null,
+            'callLists' => new \Illuminate\Pagination\LengthAwarePaginator([], 0, 15),
+            'allStatuses' => $allStatuses,
+            'allTags' => $allTags,
+            'sortBy' => 'updated_at', 'sortDirection' => 'desc',
+            'filterCompanyName' => null, 'filterPhoneNumber' => null, 'filterStatusIds' => [],
+            'startDate' => null, 'endDate' => null, 'filterByTag' => null,
         ];
     }
 

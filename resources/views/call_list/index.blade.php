@@ -339,7 +339,7 @@
                         </div>
 
                         {{-- フィルターフォーム --}}
-                        <form method="GET" action="{{ route('call-list.index') }}" x-ref="callListFilterForm"
+                        <form method="GET" action="{{ route('call-list.index') }}" x-ref="callListFilterForm" class="mb-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-md shadow">
                             class="mb-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-md shadow">
                             <h3 class="text-lg font-semibold mb-3 text-gray-800 dark:text-gray-200">フィルター</h3>
                             {{-- プリセット期間ボタン --}}
