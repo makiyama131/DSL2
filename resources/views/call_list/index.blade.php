@@ -466,12 +466,16 @@
                                                                     @php
                                                                         $fixedPhonesOutput = [];
                                                                         if ($callList->phone_number) {
-                                                                            $fixedPhonesOutput[] = e($callList->phone_number) . ' (主)';
+                                                                            $numberForLink = preg_replace('/[^\d+]/', '', $callList->phone_number);
+                                                                            $link = '<a href="tel:' . e($numberForLink) . '" class="text-indigo-600 dark:text-indigo-400 hover:underline">' . e($callList->phone_number) . '</a>';
+                                                                            $fixedPhonesOutput[] = $link . ' (主)';
                                                                         }
                                                                         // phoneNumbersリレーションから「固定」電話を取得し、(主)と重複しないものを追加
                                                                         foreach ($callList->phoneNumbers->where('phone_type', '固定') as $phone) {
                                                                             if ($callList->phone_number !== $phone->phone_number) {
-                                                                                $fixedPhonesOutput[] = e($phone->phone_number);
+                                                                                $numberForLink = preg_replace('/[^\d+]/', '', $phone->phone_number);
+                                                                                $link = '<a href="tel:' . e($numberForLink) . '" class="text-indigo-600 dark:text-indigo-400 hover:underline">' . e($phone->phone_number) . '</a>';
+                                                                                $fixedPhonesOutput[] = $link;
                                                                             }
                                                                         }
                                                                         // もし(主)がなくリレーションにのみ固定電話がある場合
@@ -496,12 +500,18 @@
                                                                     @php
                                                                         $mobilePhonesOutput = [];
                                                                         if ($callList->mobile_phone_number) {
-                                                                            $mobilePhonesOutput[] = e($callList->mobile_phone_number) . ($callList->mobile_phone_owner ? ' (' . e($callList->mobile_phone_owner) . ')' : ' (主)');
+                                                                            $numberForLink = preg_replace('/[^\d+]/', '', $callList->mobile_phone_number);
+                                                                            $ownerInfo = $callList->mobile_phone_owner ? ' (' . e($callList->mobile_phone_owner) . ')' : ' (主)';
+                                                                            $link = '<a href="tel:' . e($numberForLink) . '" class="text-indigo-600 dark:text-indigo-400 hover:underline">' . e($callList->mobile_phone_number) . '</a>';
+                                                                            $mobilePhonesOutput[] = $link . $ownerInfo;
                                                                         }
                                                                         // phoneNumbersリレーションから「携帯」電話を取得し、(主)と重複しないものを追加
                                                                         foreach ($callList->phoneNumbers->where('phone_type', '携帯') as $phone) {
                                                                             if ($callList->mobile_phone_number !== $phone->phone_number) {
                                                                                 $mobilePhonesOutput[] = e($phone->phone_number); // 携帯電話の所有者情報はここでは表示しない (必要なら追加)
+                                                                                $numberForLink = preg_replace('/[^\d+]/', '', $phone->phone_number);
+                                                                                $link = '<a href="tel:' . e($numberForLink) . '" class="text-indigo-600 dark:text-indigo-400 hover:underline">' . e($phone->phone_number) . '</a>';
+                                                                                $mobilePhonesOutput[] = $link;
                                                                             }
                                                                         }
                                                                         // もし(主)がなくリレーションにのみ携帯電話がある場合
