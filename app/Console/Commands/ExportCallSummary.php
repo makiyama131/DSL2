@@ -110,3 +110,5 @@ class ExportCallSummary extends Command
         return Command::SUCCESS;
     }
 }
+
+// php artisan export:call-summary 7

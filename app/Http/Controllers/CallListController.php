@@ -57,7 +57,7 @@ class CallListController extends Controller
             ]);
         }
 
-        
+
 
         // 3. フィルター処理
         $priorityListType = $request->query('priority_list');
@@ -67,28 +67,34 @@ class CallListController extends Controller
             // 【優先リスト表示の場合】
             // _getPriorityListIds ヘルパーメソッドで対象IDリストを取得
             $priorityListIds = $this->_getPriorityListIds($priorityListType);
-            
+
             if (empty($priorityListIds)) {
                 // 対象が0件の場合、結果が0件になるようにする
-                $query->whereRaw('1 = 0'); 
+                $query->whereRaw('1 = 0');
             } else {
-                $query->whereIn((new CallList)->getTable().'.id', $priorityListIds); // テーブル名を明示
+                $query->whereIn((new CallList)->getTable() . '.id', $priorityListIds); // テーブル名を明示
             }
         } else {
             // 【通常のフィルター表示の場合】
             // バリデーションは不要 (クエリスコープ側でnullチェックするため)
             $query->filterByCompanyName($request->query('filter_company_name'))
-                  ->filterByPhoneNumber($request->query('filter_phone_number'))
-                  ->filterByStatusIds($request->query('filter_status_ids'))
-                  ->filterByDateRange($request->query('start_date'), $request->query('end_date'));
+                ->filterByPhoneNumber($request->query('filter_phone_number'))
+                ->filterByStatusIds($request->query('filter_status_ids'))
+                ->filterByDateRange($request->query('start_date'), $request->query('end_date'));
         }
 
         // 4. 並び替え処理
         $sortBy = $request->query('sort_by', 'updated_at');
         $sortDirection = $request->query('sort_direction', 'desc');
         $sortableColumns = [
-            'id', 'company_name', 'representative_name', 'latest_call_status_id', 
-            'call_histories_count', 'updated_at', 'created_at', 'latest_actual_call_date'
+            'id',
+            'company_name',
+            'representative_name',
+            'latest_call_status_id',
+            'call_histories_count',
+            'updated_at',
+            'created_at',
+            'latest_actual_call_date'
         ];
         if (!in_array($sortBy, $sortableColumns)) $sortBy = 'updated_at';
         if (!in_array(strtolower($sortDirection), ['asc', 'desc'])) $sortDirection = 'desc';
@@ -99,13 +105,13 @@ class CallListController extends Controller
             $latestCalledAtSubquery = CallHistory::select('called_at')
                 ->whereColumn('call_list_id', $mainTable . '.id')
                 ->orderBy('called_at', 'desc')->orderBy('id', 'desc')->limit(1);
-            
+
             $query->select($mainTable . '.*') // メインテーブルのカラムを全て選択
-                  ->selectSub($latestCalledAtSubquery, 'latest_called_at_sortable') // サブクエリ結果を追加
-                  ->orderBy('latest_called_at_sortable', $sortDirection);
+                ->selectSub($latestCalledAtSubquery, 'latest_called_at_sortable') // サブクエリ結果を追加
+                ->orderBy('latest_called_at_sortable', $sortDirection);
         } elseif ($sortBy === 'call_histories_count') {
             $query->withCount('callHistories') // 関連する履歴の件数を 'call_histories_count'として追加
-                  ->orderBy('call_histories_count', $sortDirection);
+                ->orderBy('call_histories_count', $sortDirection);
         } else {
             // 通常のカラムでソート
             $query->orderBy($sortBy, $sortDirection);
@@ -128,9 +134,9 @@ class CallListController extends Controller
             // 2. 集めた電話番号または会社名に一致する架電禁止リストの情報を一度に取得
             //    誰が追加したかのユーザー情報も一緒に読み込む (Eager Loading)
             $dncEntries = DoNotCallList::whereIn('phone_number', $allPhoneNumbers)
-                                       ->orWhereIn('company_name', $companyNames)
-                                       ->with('addedByUser:id,name') // ユーザーのIDと名前だけ取得
-                                       ->get();
+                ->orWhereIn('company_name', $companyNames)
+                ->with('addedByUser:id,name') // ユーザーのIDと名前だけ取得
+                ->get();
 
             // 3. すぐに検索できるよう、電話番号と会社名をキーにしたマップ（連想配列）を作成
             $dncPhoneMap = $dncEntries->keyBy('phone_number');
@@ -139,10 +145,10 @@ class CallListController extends Controller
             // 4. 各架電リストに、対応する架電禁止情報があれば紐付ける
             $callLists->each(function ($callList) use ($dncPhoneMap, $dncCompanyMap) {
                 // 新しいプロパティ $dnc_info を各 $callList オブジェクトに追加
-                $callList->dnc_info = 
-                    $dncPhoneMap[$callList->phone_number] ?? 
-                    $dncPhoneMap[$callList->mobile_phone_number] ?? 
-                    $dncCompanyMap[$callList->company_name] ?? 
+                $callList->dnc_info =
+                    $dncPhoneMap[$callList->phone_number] ??
+                    $dncPhoneMap[$callList->mobile_phone_number] ??
+                    $dncCompanyMap[$callList->company_name] ??
                     null;
             });
         }
@@ -159,8 +165,6 @@ class CallListController extends Controller
             'startDate'         => $request->query('start_date'),
             'endDate'           => $request->query('end_date'),
         ]);
-
-                
     }
 
     /**
@@ -263,17 +267,17 @@ class CallListController extends Controller
             'url_instagram'         => 'nullable|url:http,https|max:255',
             'url_sns_other'         => 'nullable|url:http,https|max:255',
             'email'                 => 'nullable|email|max:255',
+            'website_url'           => 'nullable|url|max:2048',
+            'instagram_url' => 'nullable|url|max:2048',
+
+
         ]);
 
         // ★ シンプルな更新処理
         $callList->update($validatedData);
 
         // ★ 成功時のJSONレスポンス (変更なし)
-        return response()->json([
-            'success' => true,
-            'message' => '架電リスト (ID: ' . $callList->id . ') を更新しました。',
-            'redirect_url' => route('call-list.index')
-        ]);
+        return redirect()->route('call-list.index')->with('success', '架電リスト (ID: ' . $callList->id . ') を更新しました。');
     }
 
     /**
@@ -404,7 +408,7 @@ class CallListController extends Controller
                     ->with('error', 'インポートに必要な基本ステータス「未対応」がシステムに登録されていません。管理者に連絡してください。');
             }
             $defaultStatusId = $defaultStatus->id;
-            
+
             $allStatusesMap = CallStatusMaster::pluck('id', 'status_name');
             $currentUser = Auth::user();
 
@@ -423,12 +427,12 @@ class CallListController extends Controller
 
             // BOM(Byte Order Mark)を除去し、ヘッダーを取得
             $header = array_map(fn($h) => trim(str_replace("\u{FEFF}", '', $h)), fgetcsv($handle));
-            
+
             if (!$header || empty(array_filter($header))) {
                 fclose($handle);
                 return redirect()->route('call-list.import.form')->with('error', 'CSVファイルが空か、ヘッダーが読み込めませんでした。');
             }
-            
+
             if (!in_array('会社名', $header)) {
                 fclose($handle);
                 return redirect()->route('call-list.import.form')->with('error', 'CSVファイルに必須のヘッダー「会社名」が見つかりません。');
@@ -508,7 +512,6 @@ class CallListController extends Controller
 
             DB::commit();
             fclose($handle);
-
         } catch (\Exception $e) {
             // --- ★★★ エラーアラート強化 ★★★ ---
             // 予期せぬエラーが発生した場合の処理
@@ -516,7 +519,7 @@ class CallListController extends Controller
                 fclose($handle);
             }
             DB::rollBack();
-            
+
             // エラーの詳細をログに記録
             Log::error('CSV Import Error: ' . $e->getMessage() . ' on line ' . $e->getLine());
 
@@ -587,11 +590,11 @@ class CallListController extends Controller
             // または、いずれかの電話番号が同じか
             if (!empty($data['phone_number'])) {
                 $q->orWhere('phone_number', $data['phone_number'])
-                  ->orWhere('mobile_phone_number', $data['phone_number']);
+                    ->orWhere('mobile_phone_number', $data['phone_number']);
             }
             if (!empty($data['mobile_phone_number'])) {
                 $q->orWhere('phone_number', $data['mobile_phone_number'])
-                  ->orWhere('mobile_phone_number', $data['mobile_phone_number']);
+                    ->orWhere('mobile_phone_number', $data['mobile_phone_number']);
             }
         });
 
@@ -644,13 +647,13 @@ class CallListController extends Controller
         Log::info("Priority List ({$timeOfDay}) - Condition 1: Found " . $baseMissedCallListIds->count() . " raw lists based on their LATEST missed call time.");
 
         $missedCallListIds = CallList::whereIn('id', $baseMissedCallListIds)
-        ->where(function ($query) {
-            $query->whereDoesntHave('streak') // streak記録がない (＝連続0回)
-              ->orWhereHas('streak', function ($q) {
-                  // オブザーバーのおかげで、この値は常に「"現在"連続している不在回数」になる
-                  $q->where('consecutive_missed_calls', '<', 4); 
-                });
-        })
+            ->where(function ($query) {
+                $query->whereDoesntHave('streak') // streak記録がない (＝連続0回)
+                    ->orWhereHas('streak', function ($q) {
+                        // オブザーバーのおかげで、この値は常に「"現在"連続している不在回数」になる
+                        $q->where('consecutive_missed_calls', '<', 4);
+                    });
+            })
             ->pluck('id')
             ->toArray();
 
@@ -659,9 +662,9 @@ class CallListController extends Controller
             $missedCallListIds = CallList::whereIn('id', $baseMissedCallListIds)
                 ->where(function ($query) {
                     $query->whereDoesntHave('streak') // streak記録がない (＝連続不在ではない)
-                          ->orWhereHas('streak', function ($q) {
-                              $q->where('consecutive_missed_calls', '<', 4); // またはstreakが4回未満
-                          });
+                        ->orWhereHas('streak', function ($q) {
+                            $q->where('consecutive_missed_calls', '<', 4); // またはstreakが4回未満
+                        });
                 })
                 ->pluck('id')
                 ->toArray();
